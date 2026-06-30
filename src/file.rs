@@ -828,31 +828,30 @@ impl File {
 
     /// Attempt to discard range by truncating the file.
     ///
-    /// If the given range is at the end of the file, discard it by simply truncating the file.
-    /// Return `true` on success.
-    ///
-    /// If the range is not at the end of the file, i.e. another method of discarding is needed,
-    /// return `false`.
-    fn try_discard_by_truncate(&self, offset: u64, length: u64) -> io::Result<bool> {
-        // Prevent modifications to the file length
-        #[allow(clippy::readonly_write_lock)]
-        let file = self.file.write().unwrap();
-
+    /// limina: disabled. Upstream truncated the file when the range reached EOF; we never do.
+    /// Always returns `false` (except for a range entirely past EOF, which is a no-op), so the
+    /// caller falls through to the punch-hole path, which preserves the file's logical size.
+    fn try_discard_by_truncate(&self, offset: u64, _length: u64) -> io::Result<bool> {
+        // limina: never satisfy a discard by truncating the backing file.
+        //
+        // Upstream imago truncates the file when a discard reaches EOF (to reclaim the tail).
+        // That is wrong for a fixed-capacity virtio-blk backing file: the device capacity is
+        // derived from the file size at open, so truncation shrinks the advertised capacity on
+        // the next open. A guest filesystem sized to the original capacity — e.g. mkfs.ext4,
+        // which discards the device tail past its last block group — then becomes unmountable
+        // after a reboot ("bad geometry: block count exceeds size of device"). The data is
+        // intact; only the geometry no longer matches. See limina's
+        // spikes/m10-disk-durability/RESULTS.md.
+        //
+        // Returning false routes every discard to the punch-hole path
+        // (`discard_to_zero_os_specific`, F_PUNCHHOLE on macOS), which deallocates the blocks
+        // while preserving the file's logical size — so the capacity is stable across opens.
         let size = self.size.load(Ordering::Relaxed);
         if offset >= size {
-            // Nothing to do
+            // Range is entirely at/past EOF — nothing to do, and nothing to punch.
             return Ok(true);
         }
-
-        // If `offset + length` overflows, we can just assume it ends at `size`.  (Anything past
-        // `size is irrelevant anyway.)
-        let end = offset.checked_add(length).unwrap_or(size);
-        if end < size {
-            return Ok(false);
-        }
-
-        file.set_len(offset)?;
-        Ok(true)
+        Ok(false)
     }
 
     /// Ensure the given range reads back as zeroes, or return an error.
