@@ -17,7 +17,12 @@ nix = { version = "0.30", features = ["ioctl"] }
 page_size = "0.6"
 tokio = { version = "1", features = ["sync"], optional = true }
 tracing = { version = "0.1", features = ["attributes"] }
-vm-memory = { version = ">=0.16, <0.19", optional = true, default-features = false }
+# limina: pin to the vm-memory version the whole libkrun stack uses (krun-arch/devices/hvf/vmm
+# all on ^0.17). Upstream's ">=0.16, <0.19" lets the resolver pick a semver-incompatible
+# vm-memory for imago (0.16 or 0.18) distinct from libkrun's 0.17, so the VolatileSlice handed
+# to imago's vm-memory I/O fails `ImagoAsRef` and krun-devices won't compile. Narrowing to ^0.17
+# forces unification.
+vm-memory = { version = ">=0.17, <0.18", optional = true, default-features = false }
 
 # For build.rs
 [build-dependencies]
