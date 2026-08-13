@@ -28,6 +28,29 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{cmp, fs};
+
+/// Like `while_eintr`, but also retries a transient `EFAULT`, bounded to ~100 ms.
+///
+/// A VMM embedding imago may briefly revoke the userspace mapping of guest RAM
+/// (`mprotect(PROT_NONE)` for a few microseconds) while settling memory-accounting
+/// ledgers; kernel copyio touching a guest buffer during such a window reports `EFAULT`
+/// instead of faulting. Only the guest-buffer data path retries — a genuine `EFAULT`
+/// (otherwise always a bug) still surfaces once the retries expire.
+#[cfg(unix)]
+fn while_eintr_or_transient_efault<R: From<i8> + PartialEq, F: FnMut() -> R>(
+    mut syscall: F,
+) -> io::Result<R> {
+    let mut tries = 0u32;
+    loop {
+        match while_eintr(&mut syscall) {
+            Err(e) if e.raw_os_error() == Some(libc::EFAULT) && tries < 1000 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+            r => return r,
+        }
+    }
+}
 #[cfg(unix)]
 use tracing::{debug, warn};
 #[cfg(windows)]
@@ -186,7 +209,7 @@ impl Storage for File {
                 .try_into()
                 .map_err(|_| io::Error::other("Read offset overflow"))?;
 
-            let len = while_eintr(|| unsafe {
+            let len = while_eintr_or_transient_efault(|| unsafe {
                 libc::preadv(
                     self.file.read().as_raw_fd(),
                     iovec.as_ptr(),
@@ -248,7 +271,7 @@ impl Storage for File {
             // Keep holding the lock until `self.size` is updated, so that `resize()` (which takes
             // the write lock) always sees the current size
             let file = self.file.read();
-            let len = while_eintr(|| unsafe {
+            let len = while_eintr_or_transient_efault(|| unsafe {
                 libc::pwritev(
                     file.as_raw_fd(),
                     iovec.as_ptr(),
